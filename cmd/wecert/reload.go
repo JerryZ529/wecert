@@ -40,6 +40,11 @@ type runtimeController struct {
 // always blank), so pin the assertion at compile time.
 var _ webhook.BindingReader = (*runtimeController)(nil)
 
+// The console's Refresh button type-asserts for this capability too: without the method the
+// route is not mounted, and the button's re-derivation of the binding state silently becomes a
+// plain reload of the stale one -- the exact failure it was added to fix.
+var _ webhook.BindingRefresher = (*runtimeController)(nil)
+
 func newRuntimeController(cfg *config.Config, rec *reconcile.Reconciler, notifier reconcile.Notifier, store *state.Store) *runtimeController {
 	return &runtimeController{cfg: cfg, rec: rec, notifier: notifier, store: store}
 }
@@ -84,6 +89,19 @@ func (c *runtimeController) ProbeEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.rec.ProbeEnabled()
+}
+
+// RefreshPendingBindings is the console's Refresh action and the daemon's ten-minute timer: both
+// re-ask the cloud whether the certificates waiting for their first bind are bound yet.
+//
+// Forwarded through the controller rather than held directly, because SIGHUP swaps the reconciler
+// underneath: a timer that had captured the old one would keep asking with a manager built from the
+// previous configuration. force skips the manager's throttle window -- an operator who clicked
+// wants the answer now, the timer wants the pacing.
+func (c *runtimeController) RefreshPendingBindings(ctx context.Context, force bool) (int, []string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.rec.RefreshPendingBindings(ctx, force)
 }
 
 // BindingSnapshot exposes the bind-resource cache to the webhook inventory page.

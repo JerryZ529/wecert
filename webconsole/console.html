@@ -1766,7 +1766,21 @@ $('#clear-filter').onclick = () => {
 $('#certificate-search').oninput = (event) => { state.search = event.target.value.trim(); updateFilteredView(); };
 $('#status-filter').onchange = (event) => { state.status = event.target.value; updateFilteredView(); };
 $('#sort-order').onchange = (event) => { state.sort = event.target.value; updateFilteredView(); };
-$('#refresh-inventory').onclick = async () => { try { await loadLive(); toast('Inventory updated'); } catch (error) { toast(error.message); } };
+/* Refresh re-derives the state before re-reading it. The rows an operator looks at right after
+   touching the Tencent Cloud console are the ones whose answer changed by hand -- a first bind,
+   mostly -- and a plain reload would show the state as of the last pass, up to an hour old. The
+   POST is best-effort: a daemon that does not know the route still gets the reload. */
+$('#refresh-inventory').onclick = async () => {
+  let refreshed = null;
+  try { refreshed = await request('POST', '/api/bindings/refresh', {}); } catch { /* older daemon: reload anyway */ }
+  try {
+    await loadLive();
+    const confirmed = (refreshed && refreshed.confirmed) || [];
+    if (confirmed.length) toast(`Inventory updated · ${confirmed.join(', ')} confirmed as bound`);
+    else if (refreshed && refreshed.incomplete) toast('Inventory updated · the binding check is still running');
+    else toast('Inventory updated');
+  } catch (error) { toast(error.message); }
+};
 $('#connect-backend').onclick = () => {
   const url = $('#backend-url');
   // Same-origin is the right default: the daemon is usually behind the same
