@@ -20,11 +20,19 @@ import (
 const (
 	authzWaitTimeout = 3 * time.Minute
 
-	// bindingCheckInterval is how often an uploaded-but-unconfirmed certificate is
-	// re-checked for bindings. Six hours rather than every pass: only a human can
-	// change the answer, and the lookup is a two-call, up-to-30-second enumeration
-	// running inside the serial convergence loop.
-	bindingCheckInterval = 6 * time.Hour
+	// bindingCheckInterval is how often an uploaded-but-unconfirmed certificate may be
+	// re-checked for bindings.
+	//
+	// Only a human can change the answer, but the human is standing in front of the page: they
+	// bind the certificate in the Tencent Cloud console and expect the inventory to stop saying
+	// "bind needed". Until the answer is recorded, the deployment stays unconfirmed and the
+	// deployed metric reports false for a certificate that is serving traffic.
+	//
+	// Ten minutes bounds that gap without turning the lookup into a per-pass cost -- it is a
+	// two-call, up-to-30-second enumeration. The throttle is what keeps the daemon's own refresh
+	// timer (cmd/wecert) and the pass from asking twice inside the same window; six hours, the
+	// previous value, was chosen when the pass was the only caller.
+	bindingCheckInterval = 10 * time.Minute
 	orderWaitTimeout     = 2 * time.Minute
 	pollInterval         = 3 * time.Second
 	// ACME's expires is an optional field. When it fails to parse or is not returned we
@@ -742,7 +750,7 @@ func (m *Manager) confirmBindingIfDue(ctx context.Context, c *config.Certificate
 	if !(c.Deploy.Enabled && st.DeployedCertID != "" && !st.DeployConfirmed && m.bindingCheckDue(c.Name)) {
 		return
 	}
-	if err := m.confirmBinding(ctx, c, st); err != nil {
+	if err := m.confirmBinding(ctx, c.Name, st); err != nil {
 		// A lookup failure is not a binding failure. Renewal is the main line here and
 		// must not be dragged down by a confirmation step.
 		m.log.Warn("could not confirm the certificate binding (renewal is unaffected)",
@@ -885,23 +893,49 @@ func orderMatchesConfig(o *state.Order, c *config.Certificate) bool {
 // Recording before the attempt, not after: a lookup that errors would otherwise be
 // retried on every pass, which is the cost this exists to avoid.
 func (m *Manager) bindingCheckDue(certName string) bool {
+	if !m.bindingCheckReady(certName) {
+		return false
+	}
+	m.bindingNoteAttempt(certName)
+	return true
+}
+
+// bindingCheckReady reports whether the throttle window since the last attempt has passed, and
+// records nothing.
+//
+// Split out of bindingCheckDue for the forced refresh (see RefreshPendingBindings): an operator
+// who clicks Refresh wants the lookup now, and the readiness test has to answer without spending
+// the window on the caller's behalf.
+func (m *Manager) bindingCheckReady(certName string) bool {
 	now := m.now()
 
 	m.bindingMu.Lock()
 	defer m.bindingMu.Unlock()
 
-	if last, ok := m.bindingChecked[certName]; ok {
-		// A stored instant in the future means the clock moved BACKWARDS, not that a check just
-		// happened. now.Sub(last) is then negative, and every "less than the interval" test treats
-		// a negative duration as "recently checked": measured over three passes spanning 48 hours of
-		// wall time after a backward step, ZERO binding lookups ran, DeployConfirmed stayed false,
-		// and because probeCert returns early for a certificate that is not confirmed deployed the
-		// network probe never ran either -- the certificate was simply unverified until the clock
-		// caught up. A future instant is due now.
-		if !last.After(now) && now.Sub(last) < m.bindingCheckEvery {
-			return false
-		}
+	last, ok := m.bindingChecked[certName]
+	if !ok {
+		return true
 	}
+	// A stored instant in the future means the clock moved BACKWARDS, not that a check just
+	// happened. now.Sub(last) is then negative, and every "less than the interval" test treats
+	// a negative duration as "recently checked": measured over three passes spanning 48 hours of
+	// wall time after a backward step, ZERO binding lookups ran, DeployConfirmed stayed false,
+	// and because probeCert returns early for a certificate that is not confirmed deployed the
+	// network probe never ran either -- the certificate was simply unverified until the clock
+	// caught up. A future instant is due now.
+	return last.After(now) || now.Sub(last) >= m.bindingCheckEvery
+}
+
+// bindingNoteAttempt records that the lookup for this certificate is about to be made.
+//
+// Also called by a forced refresh, so an operator's click pushes the next automatic check out by
+// the window instead of doubling it.
+func (m *Manager) bindingNoteAttempt(certName string) {
+	now := m.now()
+
+	m.bindingMu.Lock()
+	defer m.bindingMu.Unlock()
+
 	m.bindingChecked[certName] = now
 
 	// Sweep the entries of certificates that are long gone (see cooldownMapLimit). "Expired" here is
@@ -914,7 +948,6 @@ func (m *Manager) bindingCheckDue(certName string) bool {
 			}
 		}
 	}
-	return true
 }
 
 // confirmBinding looks up once which cloud resources this certificate is bound to, and
@@ -924,7 +957,7 @@ func (m *Manager) bindingCheckDue(certName string) bool {
 // When no binding is found it stays false and logs a line with a hint -- that state means
 // "waiting for a human to bind it once in the CLB console", it is not an error, so it
 // records no failure and enters no backoff.
-func (m *Manager) confirmBinding(ctx context.Context, c *config.Certificate, st *state.CertState) error {
+func (m *Manager) confirmBinding(ctx context.Context, certName string, st *state.CertState) error {
 	n, complete, err := m.deployer.Bindings(ctx, st.DeployedCertID)
 	if err != nil {
 		return err
@@ -937,13 +970,13 @@ func (m *Manager) confirmBinding(ctx context.Context, c *config.Certificate, st 
 		// and this one is only logged.
 		m.log.Warn("could not enumerate every region this certificate could be bound in; "+
 			"leaving the binding unconfirmed and re-checking later",
-			"cert", c.Name, "certId", st.DeployedCertID)
+			"cert", certName, "certId", st.DeployedCertID)
 		return nil
 	}
 
 	if n == 0 {
 		m.log.Info("certificate uploaded but not bound to any cloud resource yet",
-			"cert", c.Name, "certId", st.DeployedCertID,
+			"cert", certName, "certId", st.DeployedCertID,
 			"hint", "bind it once in the CLB console; renewals switch it automatically afterwards")
 		return nil
 	}
@@ -954,6 +987,6 @@ func (m *Manager) confirmBinding(ctx context.Context, c *config.Certificate, st 
 	}
 
 	m.log.Info("confirmed the certificate is bound to cloud resources",
-		"cert", c.Name, "certId", st.DeployedCertID, "resources", n)
+		"cert", certName, "certId", st.DeployedCertID, "resources", n)
 	return nil
 }

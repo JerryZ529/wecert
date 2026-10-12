@@ -25,6 +25,9 @@ func (s *Server) Handler() http.Handler {
 	if g, ok := s.rec.(TXTReclaimLister); ok {
 		mux.HandleFunc("/diagnostics/txt-reclaims", s.auth(s.handleTXTReclaims(g)))
 	}
+	if br, ok := s.rec.(BindingRefresher); ok {
+		mux.HandleFunc("/api/bindings/refresh", s.auth(s.handleRefreshBindings(br)))
+	}
 
 	// Admin routes are always registered. adminAuth answers 404 while adminToken is
 	// unset, so the surface stays closed -- and a later SIGHUP that supplies the token

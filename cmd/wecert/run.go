@@ -161,6 +161,12 @@ func run() error {
 	}
 
 	log.Info("entering daemon mode", "interval", f.interval)
+	// Between passes, re-ask the binding question. A certificate a human has just bound in the
+	// Tencent Cloud console reads "bind needed" until this answer is recorded, so the interval that
+	// decides it cannot be the reconcile interval. Stopped before the store is closed, like the
+	// snapshot goroutine (defers are LIFO, and this one is registered after it).
+	stopRefresh := startBindingRefresh(ctx, bindingRefreshEvery, runtime, log)
+	defer stopRefresh()
 	reloadSignals := make(chan os.Signal, 1)
 	signal.Notify(reloadSignals, syscall.SIGHUP)
 	defer signal.Stop(reloadSignals)
