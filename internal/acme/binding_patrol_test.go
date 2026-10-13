@@ -14,6 +14,16 @@ type countingPatroller struct {
 	calls atomic.Int32
 }
 
+// The deployer the enforce path boots must satisfy the capability the manager probes for.
+//
+// PatrolBindings is requested by type assertion, and a deployer that does not implement it is
+// indistinguishable from a patrol that ran and found nothing: no error, no log line, no
+// finding -- and the display cache, whose TTL is deliberately kept just above the patrol
+// interval, keeps printing the state-store fallback ("details not reported") for the life of
+// the process. Exercising the concrete client cannot catch this, so the contract is asserted
+// here where a missing forward breaks the build.
+var _ binderPatroller = (*deploy.LazyTencentCLB)(nil)
+
 func (c *countingPatroller) PatrolBindings(_ context.Context, _ []deploy.KnownCert) ([]deploy.PatrolFinding, error) {
 	c.calls.Add(1)
 	return []deploy.PatrolFinding{{Kind: deploy.PatrolDrift, CertName: "www", CertID: "id"}}, nil
