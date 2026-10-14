@@ -196,6 +196,42 @@ func derefU64(p *uint64) uint64 {
 	return *p
 }
 
+// BindingsFresh is the "check now" lookup: it must bypass the server-side cache
+// (IsCache=0). The cached answer can be up to half an hour old, and a binding
+// made by hand in the console a minute ago is exactly the case the cache gets
+// wrong -- the operator sees "not bound" and redoes work they already did.
+func TestBindingsFreshBypassesTheServerSideCache(t *testing.T) {
+	t.Parallel()
+	clock := &fakeClock{t: time.Now()}
+	stubSleeper(t, clock)
+	d := newTestDeployer(clock.now)
+
+	var cacheFlags []uint64
+	create, result := bindAnswer("cert-fresh", "task-fresh", 1, false)
+	stubSSLClient(t, &fakeSSLAPI{
+		createTaskFn: func(_ context.Context, req *ssl.CreateCertificateBindResourceSyncTaskRequest) (*ssl.CreateCertificateBindResourceSyncTaskResponse, error) {
+			cacheFlags = append(cacheFlags, derefU64(req.IsCache))
+			return create, nil
+		},
+		taskResultFn: func(_ context.Context, _ *ssl.DescribeCertificateBindResourceTaskResultRequest) (*ssl.DescribeCertificateBindResourceTaskResultResponse, error) {
+			return result, nil
+		},
+	})
+
+	n, complete, err := d.BindingsFresh(context.Background(), "cert-fresh")
+	if err != nil || !complete || n != 1 {
+		t.Fatalf("BindingsFresh = (%d, %v, %v), want (1, true, nil)", n, complete, err)
+	}
+	if len(cacheFlags) != 1 || cacheFlags[0] != 0 {
+		t.Errorf("BindingsFresh used IsCache=%v, want 0: the cached answer can predate a just-made bind", cacheFlags)
+	}
+
+	// An empty ID keeps the same COMPLETE-zero contract as Bindings.
+	if n, complete, err := d.BindingsFresh(context.Background(), ""); err != nil || !complete || n != 0 {
+		t.Errorf(`BindingsFresh("") = (%d, %v, %v), want (0, true, nil)`, n, complete, err)
+	}
+}
+
 // An answer with no task to read is the absence of an answer, not the answer zero.
 func TestBindingCountWithoutATaskIsNotZero(t *testing.T) {
 	clock := &fakeClock{t: time.Now()}

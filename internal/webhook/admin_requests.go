@@ -52,6 +52,14 @@ func ResolveDeploy(value string) (enabled bool, target string) {
 	return false, ""
 }
 
+// UpdateCertificateRequest is PUT /admin/certificates/{name}: the console's
+// Renew action in config-driven (static / observe) mode, where the declared
+// domain set lives in the daemon configuration rather than a desired-state
+// document.
+type UpdateCertificateRequest struct {
+	Domains []string `json:"domains"`
+}
+
 // AddAccountRequest is POST /admin/accounts.
 type AddAccountRequest struct {
 	Name string `json:"name"`

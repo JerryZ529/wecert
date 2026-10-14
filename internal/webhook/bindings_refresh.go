@@ -19,12 +19,14 @@ type BindingRefresher interface {
 
 // bindingRefreshBudget bounds the work one page-triggered refresh may do.
 //
-// The console aborts a request after 15 seconds (webconsole/console.html), while a binding
-// enumeration for a certificate that is bound nowhere polls until its own ~30-second budget: the
-// SSL task answers an empty result, which means "not finished" rather than "nothing bound". Ten
-// seconds keeps the click answering instead of dying in the browser. Whatever did not finish is
-// left to the daemon's ten-minute timer, which runs the same code, and the response says so.
-const bindingRefreshBudget = 10 * time.Second
+// The console aborts the refresh request after 40 seconds (webconsole/console.html), while a
+// binding enumeration for a certificate that is bound nowhere polls until its own ~30-second
+// budget: the SSL task answers an empty result, which means "not finished" rather than "nothing
+// bound". The budget has to cover a FRESH enumeration (IsCache=0) -- the whole point of the click
+// is to see a binding made seconds ago, and the cached answer is the one that misses it -- so it
+// runs just under the browser's own timeout. Whatever did not finish is left to the daemon's
+// ten-minute timer, which runs the same code, and the response says so.
+const bindingRefreshBudget = 35 * time.Second
 
 // handleRefreshBindings re-derives the "is this certificate bound yet?" answer for every pending
 // certificate, and reports what changed.

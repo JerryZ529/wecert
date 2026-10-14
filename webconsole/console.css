@@ -213,18 +213,34 @@ h1 { font-size: 24px; line-height: 1.3; letter-spacing: -.5px; font-weight: 650;
    and the evidence note saying when the enumeration behind the rows ran. */
 .binding-row em { margin-left: 6px; padding: 1px 6px; border-radius: 99px; background: var(--blue-soft); color: var(--blue); font-size: 10px; font-style: normal; }
 .section-note { margin: 8px 0 0; color: #65757e; font-size: 11.5px; line-height: 1.5; }
-/* Renew panel: the declared domain set as chips, and the reasons the renew agent may refuse an
-   edit (a name over the profile's cap, a name that a listener still references). */
+/* Renew panel: the declared set is edited with the create dialog's own boxed rows -- one input
+   per name with the remove control inside it, "+ Add domain" underneath -- so the two domain
+   editors look and behave the same; the reasons the renew agent may refuse an edit (a name
+   over the profile's cap, a name that a listener still references) render below the rows. */
 #renew-modal .modal-card { width: min(720px, calc(100vw - 40px)); }
 .renew-section { margin: 16px 0 0; }
 .renew-section h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; color: var(--ink); font-size: 12px; font-weight: 650; }
-.renew-domains { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
-.renew-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 9px; border: 1px solid var(--line); border-radius: 999px; background: #f7faf9; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11.5px; }
-.renew-chip.added { border-color: var(--blue); background: var(--blue-soft); }
-.renew-chip .renew-remove { padding: 0 2px; border: 0; background: none; color: #77888e; font-size: 13px; line-height: 1; cursor: pointer; }
-.renew-chip .renew-remove:hover { color: var(--red); }
-.renew-add-row { display: flex; align-items: center; gap: 8px; }
-.renew-add-row input { flex: 1; min-width: 0; }
+/* The declared set scrolls inside a box of its own: a certificate can carry a hundred names and the
+   rest of the panel has to stay reachable. Five rows tall, then it scrolls -- a row is 39px (the
+   shared .domain-row min-height), the list gap is 8px, and the box adds 4px of padding and 1px of
+   border on either side. The negative side margins with matching padding keep the rows aligned with
+   the heading and "+ Add domain" while leaving the room a row's focus ring needs at the edges of a
+   scroll container. */
+#renew-domain-list {
+  max-height: calc(5 * 39px + 4 * 8px + 10px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 10px -6px;
+  padding: 4px 6px;
+  border: 1px solid #e7eeee;
+  border-radius: 8px;
+  background: #fbfcfc;
+  scrollbar-width: thin;
+}
+#renew-modal .domain-input { width: 100%; height: 36px; font-family: inherit; font-size: 13px; color: var(--ink, #1c262a); background: #ffffff; border: 1px solid #d5e0e2; border-radius: 6px; padding: 8px 11px; outline: none; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+#renew-modal .domain-input:focus { border-color: var(--blue, #087f78); box-shadow: 0 0 0 3px rgba(8, 127, 120, 0.16); }
+#renew-modal .domain-input::placeholder { color: #9cb0b5; }
+#renew-modal .domain-row.added .domain-input { border-color: var(--blue); background: var(--blue-soft); }
 .account-cell { font-variant-numeric: tabular-nums; }
 .unbound { display: flex; gap: 16px; color: var(--muted); font-size: 12px; }
 .status-neutral { color: #6f7e82; background: #f0f3f3; }
@@ -584,11 +600,14 @@ body.detail-open { overflow: hidden; }
   padding-right: 34px;
 }
 
+/* Centred on the input's own centre line (36px tall, so 13px is half of this 26px control) rather
+   than with translateY(-50%): the global button:active nudge would otherwise replace the transform
+   while the pointer is down, the control would jump out from under the cursor, and the click would
+   land on the input instead of the button. */
 .domain-remove {
   position: absolute;
   right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: calc(50% - 13px);
   flex: none;
   width: 26px;
   height: 26px;

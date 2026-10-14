@@ -137,6 +137,28 @@ func (d *TencentCLB) Bindings(ctx context.Context, certID string) (int, bool, er
 	return n.count, n.complete, err
 }
 
+// BindingsFresh is Bindings without the server-side cache: it always creates a
+// new bind-resource enumeration instead of reading whatever the cloud scanned
+// last time.
+//
+// The confirmation path uses this variant because "a human just bound the
+// certificate in the console" is exactly the moment a cached answer is known to
+// be stale. The cache is otherwise refreshed only by the periodic account-wide
+// patrol, which can be hours away -- and a console Refresh that keeps reading
+// the stale cache tells the operator their binding did not work.
+func (d *TencentCLB) BindingsFresh(ctx context.Context, certID string) (int, bool, error) {
+	if certID == "" {
+		// Same contract as Bindings: an empty ID is a COMPLETE zero.
+		return 0, true, nil
+	}
+	client, err := d.client(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	n, err := d.bindingsWith(ctx, client, certID, false)
+	return n.count, n.complete, err
+}
+
 func (d *LazyTencentCLB) Bindings(ctx context.Context, certID string) (int, bool, error) {
 	if certID == "" {
 		// An empty ID identifies nothing that could be bound, so the zero is the COMPLETE
@@ -149,6 +171,20 @@ func (d *LazyTencentCLB) Bindings(ctx context.Context, certID string) (int, bool
 		return 0, false, err
 	}
 	return inner.Bindings(ctx, certID)
+}
+
+// BindingsFresh forwards to the inner client, building it if needed. It exists
+// so the confirmation path can force a re-enumeration through the lazy wrapper
+// the daemon actually holds.
+func (d *LazyTencentCLB) BindingsFresh(ctx context.Context, certID string) (int, bool, error) {
+	if certID == "" {
+		return 0, true, nil
+	}
+	inner, err := d.client()
+	if err != nil {
+		return 0, false, err
+	}
+	return inner.BindingsFresh(ctx, certID)
 }
 
 func (d *TencentCLB) bindingsWith(ctx context.Context, client sslAPI, certID string, cached bool) (bindingCount, error) {
