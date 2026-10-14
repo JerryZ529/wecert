@@ -750,7 +750,10 @@ func (m *Manager) confirmBindingIfDue(ctx context.Context, c *config.Certificate
 	if !(c.Deploy.Enabled && st.DeployedCertID != "" && !st.DeployConfirmed && m.bindingCheckDue(c.Name)) {
 		return
 	}
-	if err := m.confirmBinding(ctx, c.Name, st); err != nil {
+	// fresh=false: this runs every pass, so it reads the cheaper cached answer.
+	// The pending-binding timer and the console Refresh are the paths that force
+	// a re-scan, and they are the ones a human is waiting on.
+	if err := m.confirmBinding(ctx, c.Name, st, false); err != nil {
 		// A lookup failure is not a binding failure. Renewal is the main line here and
 		// must not be dragged down by a confirmation step.
 		m.log.Warn("could not confirm the certificate binding (renewal is unaffected)",
@@ -950,6 +953,26 @@ func (m *Manager) bindingNoteAttempt(certName string) {
 	}
 }
 
+// lookupBindings asks the deployer how many cloud resources a certificate is
+// bound to, forcing a fresh cloud-side scan when asked.
+//
+// fresh exists because the Tencent Cloud enumeration answers from a server-side
+// cache unless the caller opts out: a binding made by hand in the console is
+// invisible to the cached answer until the periodic account-wide patrol
+// re-scans, which can be hours away. A deployer that does not expose the
+// capability still answers from whatever it has -- an older or non-Tencent
+// deployment must keep working.
+func (m *Manager) lookupBindings(ctx context.Context, certID string, fresh bool) (int, bool, error) {
+	if fresh {
+		if fd, ok := m.deployer.(interface {
+			BindingsFresh(ctx context.Context, certID string) (int, bool, error)
+		}); ok {
+			return fd.BindingsFresh(ctx, certID)
+		}
+	}
+	return m.deployer.Bindings(ctx, certID)
+}
+
 // confirmBinding looks up once which cloud resources this certificate is bound to, and
 // sets DeployConfirmed when it is bound.
 //
@@ -957,8 +980,12 @@ func (m *Manager) bindingNoteAttempt(certName string) {
 // When no binding is found it stays false and logs a line with a hint -- that state means
 // "waiting for a human to bind it once in the CLB console", it is not an error, so it
 // records no failure and enters no backoff.
-func (m *Manager) confirmBinding(ctx context.Context, certName string, st *state.CertState) error {
-	n, complete, err := m.deployer.Bindings(ctx, st.DeployedCertID)
+//
+// fresh is for the callers a human is waiting on (the console Refresh and the
+// pending-binding timer); the routine per-pass check passes false and keeps the
+// cheaper cached lookup.
+func (m *Manager) confirmBinding(ctx context.Context, certName string, st *state.CertState, fresh bool) error {
+	n, complete, err := m.lookupBindings(ctx, st.DeployedCertID, fresh)
 	if err != nil {
 		return err
 	}
