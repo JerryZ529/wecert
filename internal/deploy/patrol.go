@@ -144,6 +144,24 @@ func (d *TencentCLB) PatrolBindings(ctx context.Context, known []KnownCert) ([]P
 	return out, nil
 }
 
+// PatrolBindings is the lazy twin of the method above.
+//
+// Enforce mode boots this wrapper rather than the concrete client (see boot.go: the document,
+// not a config certificate list, decides what is deployed). The manager asks for the patrol by
+// type assertion, so a missing forward is not "no patrol this pass" -- it is a step that never
+// runs at all: no error, no finding, no log line, and the last process's answer keeps being
+// served. The display cache is where that becomes visible: its TTL is kept just above the
+// patrol interval precisely so the last enumeration stays on screen, so a patrol that never
+// runs leaves every binding column on the state-store fallback ("details not reported") for as
+// long as the process lives.
+func (d *LazyTencentCLB) PatrolBindings(ctx context.Context, known []KnownCert) ([]PatrolFinding, error) {
+	inner, err := d.client()
+	if err != nil {
+		return nil, err
+	}
+	return inner.PatrolBindings(ctx, known)
+}
+
 // bindingItemsWith is the full-row form of bindingsWith (see ParseCLBBindingItems).
 func (d *TencentCLB) bindingItemsWith(ctx context.Context, client sslAPI, certID string, cached bool) (BindingSnapshot, error) {
 	if certID == "" {
