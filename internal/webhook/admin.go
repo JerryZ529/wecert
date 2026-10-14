@@ -43,9 +43,12 @@ type AdminOps struct {
 	ListBindings       func(ctx context.Context) (any, error)
 	DeploymentSettings func(ctx context.Context) (any, error)
 	CreateCertificate  func(ctx context.Context, body CreateCertificateRequest) (any, error)
-	DeleteCertificate  func(ctx context.Context, name string) (any, error)
-	BindCertificate    func(ctx context.Context, name string, body BindCertificateRequest) (any, error)
-	UnbindCertificate  func(ctx context.Context, name string) (any, error)
+	// UpdateCertificate rewrites an existing certificate's declared domain set
+	// (the console's Renew action when the config file is the desired state).
+	UpdateCertificate func(ctx context.Context, name string, body UpdateCertificateRequest) (any, error)
+	DeleteCertificate func(ctx context.Context, name string) (any, error)
+	BindCertificate   func(ctx context.Context, name string, body BindCertificateRequest) (any, error)
+	UnbindCertificate func(ctx context.Context, name string) (any, error)
 }
 
 // confirmGrant is a one-shot restore ticket. Source, when non-empty, is the only

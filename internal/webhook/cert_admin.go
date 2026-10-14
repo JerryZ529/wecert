@@ -157,6 +157,27 @@ func (s *Server) handleAdminCertificateOne() http.HandlerFunc {
 				return
 			}
 			writeJSON(w, http.StatusOK, out)
+		case r.Method == http.MethodPut && action == "":
+			// The console's Renew action for config-driven deployments: the
+			// declared domain set is a field of the configuration, so editing it
+			// is an admin operation here rather than a desired-state write.
+			if s.ops.UpdateCertificate == nil {
+				writeOpsMissing(w, "certificate management")
+				return
+			}
+			var body UpdateCertificateRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must be JSON"})
+				return
+			}
+			s.audit(r, "admin_update_certificate", map[string]any{"name": name, "domains": body.Domains})
+			out, err := s.ops.UpdateCertificate(r.Context(), name, body)
+			if err != nil {
+				s.audit(r, "admin_update_certificate_failed", map[string]any{"name": name, "err": err.Error()})
+				writeOpError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, out)
 		case r.Method == http.MethodPost && action == "bind":
 			if s.ops.BindCertificate == nil {
 				writeOpsMissing(w, "certificate binding")
@@ -187,7 +208,7 @@ func (s *Server) handleAdminCertificateOne() http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusOK, out)
 		default:
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use DELETE on the name, or POST .../bind, POST .../unbind"})
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use PUT on the name to edit its declared domains, DELETE to remove it, or POST .../bind, POST .../unbind"})
 		}
 	}
 }

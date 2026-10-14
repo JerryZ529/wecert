@@ -188,6 +188,9 @@ func registerCertAdminOps(ops *webhook.AdminOps, cfg *config.Config, log *slog.L
 	ops.CreateCertificate = func(ctx context.Context, body webhook.CreateCertificateRequest) (any, error) {
 		return createCertificateAdmin(cfg, body, log)
 	}
+	ops.UpdateCertificate = func(ctx context.Context, name string, body webhook.UpdateCertificateRequest) (any, error) {
+		return updateCertificateAdmin(cfg, name, body, log)
+	}
 	ops.DeleteCertificate = func(ctx context.Context, name string) (any, error) {
 		return deleteCertificateAdmin(cfg, name, log)
 	}
@@ -698,6 +701,140 @@ func removeCertificateFromConfig(path, name string) error {
 		}
 	}
 	certs.Content = kept
+	updated, err := encodeYAML(&doc)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(path, updated, 0600)
+}
+
+// updateCertificateAdmin rewrites one certificate's declared domain set in the
+// daemon configuration -- the console's Renew action when the config file is
+// the desired state (static / observe mode).
+//
+// Enforce mode is refused on purpose: there the desired-state document is the
+// single source of truth, and writing the config would create a change the
+// daemon silently ignores. The reload that follows re-derives the fleet, and a
+// genuinely different domain set goes through the normal SAN-drift path
+// (re-issue, DNS-01 validation, rebind).
+func updateCertificateAdmin(cfg *config.Config, name string, body webhook.UpdateCertificateRequest, log *slog.Logger) (any, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if err := safePathComponent("name", name); err != nil {
+		return nil, err
+	}
+	current, err := config.Load(configPathForAdmin)
+	if err != nil {
+		return nil, fmt.Errorf("cannot re-read the current configuration: %w", err)
+	}
+	if current.DesiredState.Mode == config.ModeEnforce {
+		return nil, webhook.InvalidRequestf(
+			"desiredState.mode=%q: the desired-state document decides the certificate set, "+
+				"so the declared domains cannot be edited from the console", current.DesiredState.Mode)
+	}
+	domains := normalizeDeclaredDomains(body.Domains)
+	if len(domains) == 0 {
+		return nil, webhook.InvalidRequestf("at least one domain is required")
+	}
+	for _, d := range domains {
+		if err := config.ValidateDomain(d); err != nil {
+			return nil, webhook.InvalidRequestf("invalid domain %q: %v", d, err)
+		}
+	}
+	if err := updateCertificateDomainsInConfig(configPathForAdmin, name, domains); err != nil {
+		return nil, err
+	}
+	log.Info("certificate domains updated in the config", "cert", name, "domains", domains)
+
+	// Keep the console registry row in step: it is what the inventory shows for
+	// a certificate that has not been issued yet.
+	if list, rerr := webhook.ReadConsoleCertificates(cfg.StatePath); rerr != nil {
+		log.Warn("domains updated, but the console registry could not be read", "cert", name, "err", rerr)
+	} else {
+		changed := false
+		for i := range list {
+			if list[i].Name == name {
+				list[i].Domains = append([]string(nil), domains...)
+				changed = true
+			}
+		}
+		if changed {
+			if werr := webhook.WriteConsoleCertificates(cfg.StatePath, list); werr != nil {
+				log.Warn("domains updated, but the console registry could not be rewritten", "cert", name, "err", werr)
+			}
+		}
+	}
+
+	if err := signalSelf(syscall.SIGHUP); err != nil {
+		return nil, fmt.Errorf("domains updated, but daemon reload failed: %w", err)
+	}
+	return map[string]any{
+		"ok": true, "name": name, "status": "domains-updated", "domains": domains,
+		"note": "written to " + configPathForAdmin + "; daemon reloading and reconciling now",
+	}, nil
+}
+
+// normalizeDeclaredDomains trims, drops empty entries and de-duplicates while
+// preserving declaration order: the first name is the certificate's primary
+// name, so sorting would silently reorder the operator's intent.
+func normalizeDeclaredDomains(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, d := range in {
+		d = strings.TrimSpace(d)
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+// updateCertificateDomainsInConfig replaces the domains list of the named
+// certificate, leaving every other entry and field untouched. A name that is
+// not declared is refused: renew edits an existing declaration, it does not
+// create one (that is the console's create flow).
+func updateCertificateDomainsInConfig(path, name string, domains []string) error {
+	if path == "" {
+		return fmt.Errorf("config path is unknown to this process")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("invalid configuration")
+	}
+	certs := yamlFind(doc.Content[0], "certificates")
+	if certs == nil || isEmptySequence(certs) || certs.Kind != yaml.SequenceNode {
+		return webhook.InvalidRequestf("certificate %q is not declared in the configuration", name)
+	}
+	var target *yaml.Node
+	for _, item := range certs.Content {
+		if item.Kind != yaml.MappingNode {
+			continue
+		}
+		if got := yamlFind(item, "name"); got != nil && got.Value == name {
+			target = item
+			break
+		}
+	}
+	if target == nil {
+		return webhook.InvalidRequestf("certificate %q is not declared in the configuration", name)
+	}
+	seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	for _, d := range domains {
+		seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: d})
+	}
+	if got := yamlFind(target, "domains"); got != nil {
+		*got = *seq
+	} else {
+		target.Content = append(target.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "domains"}, seq)
+	}
 	updated, err := encodeYAML(&doc)
 	if err != nil {
 		return err
