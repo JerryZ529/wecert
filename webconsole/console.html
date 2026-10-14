@@ -222,18 +222,34 @@ h1 { font-size: 24px; line-height: 1.3; letter-spacing: -.5px; font-weight: 650;
    and the evidence note saying when the enumeration behind the rows ran. */
 .binding-row em { margin-left: 6px; padding: 1px 6px; border-radius: 99px; background: var(--blue-soft); color: var(--blue); font-size: 10px; font-style: normal; }
 .section-note { margin: 8px 0 0; color: #65757e; font-size: 11.5px; line-height: 1.5; }
-/* Renew panel: the declared domain set as chips, and the reasons the renew agent may refuse an
-   edit (a name over the profile's cap, a name that a listener still references). */
+/* Renew panel: the declared set is edited with the create dialog's own boxed rows -- one input
+   per name with the remove control inside it, "+ Add domain" underneath -- so the two domain
+   editors look and behave the same; the reasons the renew agent may refuse an edit (a name
+   over the profile's cap, a name that a listener still references) render below the rows. */
 #renew-modal .modal-card { width: min(720px, calc(100vw - 40px)); }
 .renew-section { margin: 16px 0 0; }
 .renew-section h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; color: var(--ink); font-size: 12px; font-weight: 650; }
-.renew-domains { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
-.renew-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 9px; border: 1px solid var(--line); border-radius: 999px; background: #f7faf9; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11.5px; }
-.renew-chip.added { border-color: var(--blue); background: var(--blue-soft); }
-.renew-chip .renew-remove { padding: 0 2px; border: 0; background: none; color: #77888e; font-size: 13px; line-height: 1; cursor: pointer; }
-.renew-chip .renew-remove:hover { color: var(--red); }
-.renew-add-row { display: flex; align-items: center; gap: 8px; }
-.renew-add-row input { flex: 1; min-width: 0; }
+/* The declared set scrolls inside a box of its own: a certificate can carry a hundred names and the
+   rest of the panel has to stay reachable. Five rows tall, then it scrolls -- a row is 39px (the
+   shared .domain-row min-height), the list gap is 8px, and the box adds 4px of padding and 1px of
+   border on either side. The negative side margins with matching padding keep the rows aligned with
+   the heading and "+ Add domain" while leaving the room a row's focus ring needs at the edges of a
+   scroll container. */
+#renew-domain-list {
+  max-height: calc(5 * 39px + 4 * 8px + 10px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 10px -6px;
+  padding: 4px 6px;
+  border: 1px solid #e7eeee;
+  border-radius: 8px;
+  background: #fbfcfc;
+  scrollbar-width: thin;
+}
+#renew-modal .domain-input { width: 100%; height: 36px; font-family: inherit; font-size: 13px; color: var(--ink, #1c262a); background: #ffffff; border: 1px solid #d5e0e2; border-radius: 6px; padding: 8px 11px; outline: none; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+#renew-modal .domain-input:focus { border-color: var(--blue, #087f78); box-shadow: 0 0 0 3px rgba(8, 127, 120, 0.16); }
+#renew-modal .domain-input::placeholder { color: #9cb0b5; }
+#renew-modal .domain-row.added .domain-input { border-color: var(--blue); background: var(--blue-soft); }
 .account-cell { font-variant-numeric: tabular-nums; }
 .unbound { display: flex; gap: 16px; color: var(--muted); font-size: 12px; }
 .status-neutral { color: #6f7e82; background: #f0f3f3; }
@@ -593,11 +609,14 @@ body.detail-open { overflow: hidden; }
   padding-right: 34px;
 }
 
+/* Centred on the input's own centre line (36px tall, so 13px is half of this 26px control) rather
+   than with translateY(-50%): the global button:active nudge would otherwise replace the transform
+   while the pointer is down, the control would jump out from under the cursor, and the click would
+   land on the input instead of the button. */
 .domain-remove {
   position: absolute;
   right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: calc(50% - 13px);
   flex: none;
   width: 26px;
   height: 26px;
@@ -1313,11 +1332,11 @@ function clearLegacyTokens() {
   if (url.href !== location.href) history.replaceState(null, '', url);
 }
 
-async function fetchJSON(base, method, path, body) {
+async function fetchJSON(base, method, path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   assertSecureTransport(base);
   const controller = new AbortController();
   pendingRequests.add(controller);
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const headers = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -1339,10 +1358,10 @@ async function fetchJSON(base, method, path, body) {
   }
 }
 
-async function request(method, path, body, admin = false) {
+async function request(method, path, body, admin = false, timeoutMs = REQUEST_TIMEOUT_MS) {
   if (!state.base || !state.sessionOK) throw new Error('Connect in System settings first.');
   if (admin ? !state.canAdmin : !state.canRead) throw new Error(admin ? 'An admin session is required.' : 'A read session is required.');
-  return fetchJSON(state.base, method, path, body);
+  return fetchJSON(state.base, method, path, body, timeoutMs);
 }
 
 function setSession(session) {
@@ -1722,13 +1741,47 @@ function openCertificateDeletion(name) {
 }
 
 /* ── renew: edit one certificate's declared domain set ─────────────────────────────────────────
-   Renewal here means editing the declaration, not re-running issuance with the same names. The
-   renew agent (GET/POST /renew/... behind the console's own Basic Auth) reads the certificate's
-   declared names, validates the candidate document with the daemon's dry run, keeps a backup, writes
-   it, and only then reconciles that one certificate. This page never writes the document and needs
-   no path to it; the only thing it adds to an ordinary request is the intent header the agent
-   requires, because a renewal is not something a cross-site form should be able to trigger. */
+   Renewal here means editing the declaration, not re-running issuance with the same names. Two
+   backends exist, and the deployment says which one applies:
+     · config-driven (static / observe: deployment.editable) — the daemon owns the declaration, so
+       this page PUTs the new domain set to /admin/certificates/<name> and asks for a reconcile.
+     · enforced (a desired-state document) — the renew agent (GET/POST /renew/... behind the
+       console's own Basic Auth) reads the certificate's declared names, validates the candidate
+       document with the daemon's dry run, keeps a backup, writes it, and only then reconciles that
+       one certificate. This page never writes the document and needs no path to it; the only thing
+       it adds to an ordinary request is the intent header the agent requires, because a renewal is
+       not something a cross-site form should be able to trigger. */
 let renewState = null;
+
+// The daemon reports editable=false exactly when a desired-state document
+// decides the fleet, so this flag picks the backend without a probe request.
+function renewConfigDriven() {
+  return state.deployment?.editable === true;
+}
+
+// The config-driven panel's data comes from the inventory row the page already
+// has: the declaration IS the configured domain set, and the daemon's reload
+// closes the loop. Fields the agent supplies (document revision, issue
+// progress) have no equivalent here and render as "—".
+function renewPanelData(name) {
+  const cert = certificateByName(name);
+  const domains = (cert?.domains || []).slice();
+  return {
+    configDriven: true,
+    desiredDomains: domains,
+    issuedDomains: domains,
+    boundDomains: (cert?.bindings?.items || []).map(item => item.sniDomain).filter(Boolean),
+    profiles: { maxNames: 100 },
+    issued: {
+      certId: cert?.deployedCertId || '',
+      daysLeft: cert?.daysLeft,
+      notAfter: cert?.notAfter || ''
+    },
+    documentRevision: '',
+    issue: {},
+    ari: ''
+  };
+}
 
 function renewRequest(method, path, body) {
   const controller = new AbortController();
@@ -1760,38 +1813,141 @@ function renewRemovedBound() {
   return (s.data.boundDomains || []).filter(domain => !s.draft.includes(domain));
 }
 
-function addRenewDomain(raw) {
-  const s = renewState;
-  if (!s || !s.data) return;
-  const value = String(raw || '').trim().toLowerCase().replace(/\.$/, '');
-  if (!value) return;
-  if (s.draft.length >= ((s.data.profiles || {}).maxNames || 100)) {
-    s.warn = `${(s.data.profiles || {}).maxNames} names is the cap for this profile; remove one first.`;
-  } else if (!/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(value)) {
-    s.warn = `"${value}" is not a domain name. A wildcard has to be the left-most label: *.example.com`;
-  } else if (s.draft.includes(value)) {
-    s.warn = `${value} is already in the list.`;
-  } else {
-    s.draft.push(value);
-    s.warn = '';
-    s.result = null;
-  }
-  renderRenewPanel();
-  const field = $('#renew-add');
-  if (field) field.focus();
+// The declared set is edited with the create dialog's own rows: one boxed input per name with
+// the remove control inside it, and "+ Add domain" underneath. Everything below reads the draft
+// back out of those boxes, normalised exactly the way the single add box used to do it.
+function renewNormalizeDomain(raw) {
+  return String(raw || '').trim().toLowerCase().replace(/\.$/, '');
 }
 
-function removeRenewDomain(value) {
-  if (!renewState || !renewState.data) return;
-  renewState.draft = renewState.draft.filter(domain => domain !== value);
-  renewState.warn = '';
-  renewState.result = null;
-  renderRenewPanel();
+function renewDomainInputs() {
+  return [...document.querySelectorAll('#renew-domain-list .domain-input')];
+}
+
+function renewDraftFromBoxes() {
+  return renewDomainInputs().map(input => renewNormalizeDomain(input.value)).filter(Boolean);
+}
+
+function renewRowHTML(value, added) {
+  return `<div class="domain-row${added ? ' added' : ''}">`
+    + `<input class="domain-input" value="${escapeHTML(value)}" placeholder="www.example.com or *.example.com" autocomplete="off" spellcheck="false" aria-label="Domain name">`
+    + `<button type="button" class="domain-remove" aria-label="Remove domain">×</button>`
+    + `</div>`;
+}
+
+function renewApplyLabel(dirty, addedCount, removedCount) {
+  if (!dirty) return 'No change yet';
+  const add = addedCount ? `+${addedCount}` : '';
+  const remove = removedCount ? `−${removedCount}` : '';
+  return `File change (${add}${add && remove ? ' ' : ''}${remove})`;
+}
+
+function setRenewWarn(message) {
+  if (renewState) renewState.warn = message || '';
+  const box = $('#renew-warn');
+  if (box) {
+    box.textContent = message || '';
+    box.hidden = !message;
+  }
+}
+
+// A re-render would drop the caret, so keystrokes only refresh what is derived from the boxes:
+// the count, the "added" tracing, the listener note and the submit button.
+function renewSyncDraft() {
+  const s = renewState;
+  if (!s || !s.data) return;
+  s.draft = renewDraftFromBoxes();
+  if (s.result) {
+    s.result = null;
+    const filed = $('#renew-filed');
+    if (filed) filed.remove();
+  }
+  const declared = s.data.desiredDomains || [];
+  const added = s.draft.filter(domain => !declared.includes(domain));
+  const removed = declared.filter(domain => !s.draft.includes(domain));
+  renewDomainInputs().forEach(input => {
+    const row = input.closest('.domain-row');
+    const value = renewNormalizeDomain(input.value);
+    row.classList.toggle('added', Boolean(value) && !declared.includes(value));
+  });
+  const count = $('#renew-count');
+  if (count) count.textContent = `Total ${s.draft.length}`;
+  const note = $('#renew-bound-note');
+  if (note) {
+    const bound = renewRemovedBound();
+    note.hidden = !bound.length;
+    const names = note.querySelector('b');
+    if (names) names.textContent = bound.join(', ');
+  }
+  const apply = $('#renew-apply');
+  if (apply) {
+    const dirty = renewDirty();
+    apply.disabled = !(dirty && s.data.canRenew !== false);
+    apply.textContent = renewApplyLabel(dirty, added.length, removed.length);
+  }
+}
+
+// "+ Add domain", the same control the create dialog uses: it appends one empty boxed row,
+// bounded by the profile's cap (100 names for classic).
+function addRenewDomainRow() {
+  const s = renewState;
+  if (!s || !s.data) return;
+  const cap = (s.data.profiles || {}).maxNames || 100;
+  if (renewDraftFromBoxes().length >= cap) {
+    setRenewWarn(`${cap} names is the cap for this profile; remove one first.`);
+    return;
+  }
+  const list = $('#renew-domain-list');
+  if (!list) return;
+  const holder = document.createElement('div');
+  holder.innerHTML = renewRowHTML('', false);
+  const row = holder.firstElementChild;
+  list.append(row);
+  setRenewWarn('');
+  row.querySelector('.domain-input').focus();
+  renewSyncDraft();
+}
+
+function removeRenewDomainRow(button) {
+  const list = $('#renew-domain-list');
+  const row = button.closest('.domain-row');
+  if (!list || !row) return;
+  if (list.querySelectorAll('.domain-row').length > 1) row.remove();
+  else row.querySelector('.domain-input').value = '';
+  setRenewWarn('');
+  renewSyncDraft();
+}
+
+// The rules the single add box enforced, now checked over the whole edited set before it is
+// filed: at least one name, the profile cap, the domain shape, and no duplicates.
+function renewValidateDraft(draft) {
+  const s = renewState;
+  const cap = ((s.data || {}).profiles || {}).maxNames || 100;
+  if (!draft.length) return 'A certificate needs at least one name.';
+  if (draft.length > cap) return `${cap} names is the cap for this profile; remove one first.`;
+  for (const value of draft) {
+    if (!/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(value)) {
+      return `"${value}" is not a domain name. A wildcard has to be the left-most label: *.example.com`;
+    }
+  }
+  const seen = new Set();
+  for (const value of draft) {
+    if (seen.has(value)) return `${value} is already in the list.`;
+    seen.add(value);
+  }
+  return '';
 }
 
 async function openRenewPanel(name) {
   renewState = { name, data: null, draft: [], busy: true, warn: '', result: null };
   renderRenewPanel();
+  if (renewConfigDriven()) {
+    renewState.data = renewPanelData(name);
+    renewState.draft = renewState.data.desiredDomains.slice();
+    renewState.busy = false;
+    renderRenewPanel();
+    return;
+  }
   try {
     const data = await renewRequest('GET', `/renew/cert/${encodeURIComponent(name)}`);
     if (!renewState || renewState.name !== name) return;
@@ -1802,23 +1958,41 @@ async function openRenewPanel(name) {
   }
   if (renewState && renewState.name === name) renewState.busy = false;
   renderRenewPanel();
-  const field = $('#renew-add');
-  if (field) field.focus();
 }
 
 async function applyRenew() {
   const s = renewState;
-  if (!s || !s.data || !renewDirty()) return;
-  const draft = s.draft.slice();
+  if (!s || !s.data) return;
+  // The boxes are the source of truth: normalise them, refuse the edit if the set breaks a rule,
+  // then let the dirty check decide whether there is anything to file.
+  const draft = renewDraftFromBoxes();
+  const problem = renewValidateDraft(draft);
+  if (problem) { setRenewWarn(problem); return; }
+  s.draft = draft;
+  if (!renewDirty()) return;
+  const declared = (s.data.desiredDomains || []).slice();
+  const added = draft.filter(domain => !declared.includes(domain));
+  const removed = declared.filter(domain => !draft.includes(domain));
   s.busy = true;
   s.warn = '';
   renderRenewPanel();
   try {
-    // The agent's confirmation phrase is the certificate name, and the panel names the
-    // certificate, so clicking "File change" is that confirmation.
-    s.result = await renewRequest('POST', `/renew/cert/${encodeURIComponent(s.name)}`, { domains: draft, confirm: s.name });
-    s.data.desiredDomains = draft.slice();
-    recordOperation(s.name, `Filed renewal (+${(s.result.added || []).length} / −${(s.result.removed || []).length})`);
+    if (s.data.configDriven) {
+      // The daemon writes the declaration into its configuration and reloads.
+      // The reconcile trigger is best effort: the periodic pass converges the
+      // change even when the call fails.
+      await request('PUT', `/admin/certificates/${encodeURIComponent(s.name)}`, { domains: draft }, true);
+      let reconcileStatus = 'skipped';
+      try { await request('POST', '/hook/reconcile', { cert: s.name }); reconcileStatus = '200'; } catch { /* the pass picks it up */ }
+      s.data.desiredDomains = draft.slice();
+      s.result = { added, removed, revisionBefore: '—', revisionAfter: '—', trigger: { httpStatus: reconcileStatus }, boundRemoved: [] };
+    } else {
+      // The agent's confirmation phrase is the certificate name, and the panel names the
+      // certificate, so clicking "File change" is that confirmation.
+      s.result = await renewRequest('POST', `/renew/cert/${encodeURIComponent(s.name)}`, { domains: draft, confirm: s.name });
+      s.data.desiredDomains = draft.slice();
+    }
+    recordOperation(s.name, `Filed renewal (+${added.length} / −${removed.length})`);
     toast(`${s.name}: change filed; the daemon is reissuing it now`);
     setTimeout(() => { loadLive().catch(() => { /* the sync warning explains stale data */ }); }, 2500);
   } catch (error) {
@@ -1840,32 +2014,32 @@ function renderRenewPanel() {
   }
   const data = s.data || {};
   const issued = data.issued || {};
-  const profiles = data.profiles || {};
   const declared = data.desiredDomains || [];
   const added = s.draft.filter(domain => !declared.includes(domain));
   const removed = declared.filter(domain => !s.draft.includes(domain));
   const boundRemoved = renewRemovedBound();
   const dirty = renewDirty();
 
-  const chips = s.draft.map(domain => `<span class="renew-chip${added.includes(domain) ? ' added' : ''}">${escapeHTML(domain)}<button type="button" class="renew-remove" data-renew-remove="${escapeHTML(domain)}" aria-label="Remove ${escapeHTML(domain)}" title="Remove this name">×</button></span>`).join('')
-    || '<span class="field-hint">No names left — a certificate needs at least one.</span>';
+  // Always at least one box, so the editor is never a dead end when the declaration is empty.
+  const rows = (s.draft.length ? s.draft : ['']).map(domain => renewRowHTML(domain, added.includes(domain))).join('');
 
   const body = s.busy && !s.data
-    ? '<p>Reading the declared domains from the renew agent…</p>'
+    ? `<p>Reading the declared domains from ${renewConfigDriven() ? 'the daemon' : 'the renew agent'}…</p>`
     : !s.data
-      ? `<p class="form-error">${escapeHTML(s.warn || 'The renew agent is not reachable.')}</p>
-         <p class="security-note">Renewals are filed by <code>wecert-renew-agent.service</code>; this page reaches it through the <code>/renew/</code> proxy on this host. If the unit is down, or the deployment declares its certificates in the config file instead of a desired-state document, the panel cannot edit anything.</p>`
-      : `<p>Edit the names this certificate covers, then file the change. The agent validates it with the daemon's own dry run, keeps a backup of the declared-state document, and reconciles this one certificate.</p>
+      ? `<p class="form-error">${escapeHTML(s.warn || (renewConfigDriven() ? 'The daemon did not answer.' : 'The renew agent is not reachable.'))}</p>
+         <p class="security-note">${renewConfigDriven()
+            ? 'This deployment declares its certificates in the daemon configuration, so the change is written there and the daemon reloads.'
+            : 'Renewals are filed by <code>wecert-renew-agent.service</code>; this page reaches it through the <code>/renew/</code> proxy on this host. If the unit is down, the panel cannot edit anything.'}</p>`
+      : `<p>${renewConfigDriven()
+          ? 'Edit the names this certificate covers, then file the change. The daemon writes the declaration into its configuration, reloads, and reissues this one certificate when the name set changed.'
+          : "Edit the names this certificate covers, then file the change. The agent validates it with the daemon's own dry run, keeps a backup of the declared-state document, and reconciles this one certificate."}</p>
          <section class="renew-section">
-           <h3>Declared domains <span class="section-count">${s.draft.length}</span> <span class="field-hint">limit ${escapeHTML(String(profiles.maxNames || 100))} · first name is the primary</span></h3>
-           <div class="renew-domains">${chips}</div>
-           <div class="renew-add-row">
-             <input id="renew-add" placeholder="www.example.com or *.example.com" autocomplete="off" spellcheck="false">
-             <button type="button" class="small-btn" id="renew-add-btn">Add</button>
-           </div>
+           <h3>Declared domains <span class="section-count" id="renew-count">Total ${s.draft.length}</span> <span class="field-hint">first name is the primary</span></h3>
+           <div class="domain-list" id="renew-domain-list">${rows}</div>
+           <button type="button" class="text-link" id="renew-domain-add">+ Add domain</button>
          </section>
-         ${s.warn ? `<p class="form-error">${escapeHTML(s.warn)}</p>` : ''}
-         ${boundRemoved.length ? `<p class="security-note">Still referenced by a listener: <b>${escapeHTML(boundRemoved.join(', '))}</b>. Removing a name from the declaration does not detach it from the load balancer — the listener keeps serving the current certificate for it until you change it in the Tencent Cloud console.</p>` : ''}
+         <p class="form-error" id="renew-warn" ${s.warn ? '' : 'hidden'}>${escapeHTML(s.warn || '')}</p>
+         <p class="security-note" id="renew-bound-note" ${boundRemoved.length ? '' : 'hidden'}>Still referenced by a listener: <b>${escapeHTML(boundRemoved.join(', '))}</b>. Removing a name from the declaration does not detach it from the load balancer — the listener keeps serving the current certificate for it until you change it in the Tencent Cloud console.</p>
          <section class="renew-section">
            <h3>Current certificate</h3>
            <dl class="kv">
@@ -1875,17 +2049,17 @@ function renderRenewPanel() {
              <dt>Expires</dt><dd>${issued.daysLeft == null ? '—' : `${escapeHTML(String(issued.daysLeft))} days${issued.notAfter ? ` · ${escapeHTML(issued.notAfter.slice(0, 10))}` : ''}`}</dd>
              <dt>Renewal state</dt><dd>${escapeHTML((data.issue || {}).state || '—')}${(data.issue || {}).hint ? ` <span class="field-hint">${escapeHTML(data.issue.hint)}</span>` : ''}</dd>
            </dl>
-           <p class="security-note">Document revision ${escapeHTML(String(data.documentRevision || '').slice(0, 12))}${data.ari ? ` · renewal window from the CA: ${escapeHTML(String(data.ari))}` : ''}</p>
+           ${data.configDriven ? '' : `<p class="security-note">Document revision ${escapeHTML(String(data.documentRevision || '').slice(0, 12))}${data.ari ? ` · renewal window from the CA: ${escapeHTML(String(data.ari))}` : ''}</p>`}
          </section>
-         ${s.result ? `<section class="renew-section"><h3>Filed</h3><dl class="kv">
-             <dt>Revision</dt><dd>${escapeHTML(String(s.result.revisionBefore || '').slice(0, 12))} → ${escapeHTML(String(s.result.revisionAfter || '').slice(0, 12))}</dd>
+         ${s.result ? `<section class="renew-section" id="renew-filed"><h3>Filed</h3><dl class="kv">
+             ${s.data.configDriven ? '' : `<dt>Revision</dt><dd>${escapeHTML(String(s.result.revisionBefore || '').slice(0, 12))} → ${escapeHTML(String(s.result.revisionAfter || '').slice(0, 12))}</dd>`}
              <dt>Added</dt><dd>${escapeHTML((s.result.added || []).join(', ') || '—')}</dd>
              <dt>Removed</dt><dd>${escapeHTML((s.result.removed || []).join(', ') || '—')}</dd>
              <dt>Reconcile</dt><dd>HTTP ${escapeHTML(String((s.result.trigger || {}).httpStatus || '?'))} — the daemon converges this one certificate now; the row refreshes by itself.</dd>
            </dl>${(s.result.boundRemoved || []).length ? `<p class="security-note">Still referenced by a listener: <b>${escapeHTML((s.result.boundRemoved || []).join(', '))}</b>.</p>` : ''}</section>` : ''}
          <div class="modal-actions">
            <button type="button" class="small-btn" data-close-renew>Cancel</button>
-           <button type="button" class="primary" id="renew-apply" ${dirty && data.canRenew !== false ? '' : 'disabled'}>${dirty ? `File change (${added.length ? `+${added.length}` : ''}${added.length && removed.length ? ' ' : ''}${removed.length ? `−${removed.length}` : ''})` : 'No change yet'}</button>
+           <button type="button" class="primary" id="renew-apply" ${dirty && data.canRenew !== false ? '' : 'disabled'}>${renewApplyLabel(dirty, added.length, removed.length)}</button>
          </div>`;
 
   modal.innerHTML = `<form class="modal-card" onsubmit="return false">
@@ -1896,15 +2070,23 @@ function renderRenewPanel() {
   modal.querySelectorAll('[data-close-renew]').forEach(button => {
     button.onclick = () => { modal.classList.remove('open'); renewState = null; $('#certificate-search').focus(); };
   });
-  modal.querySelectorAll('[data-renew-remove]').forEach(button => {
-    button.onclick = () => removeRenewDomain(button.dataset.renewRemove);
-  });
-  const input = $('#renew-add');
-  if (input) {
-    input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addRenewDomain(input.value); input.value = ''; } };
+  // The same two delegated listeners the create dialog puts on its own list; the rows are
+  // re-created on every render, so they are re-bound here each time.
+  const list = $('#renew-domain-list');
+  if (list) {
+    list.addEventListener('input', (event) => {
+      if (!event.target.classList || !event.target.classList.contains('domain-input')) return;
+      // An edit invalidates whatever the last attempt said, so the note goes with it.
+      setRenewWarn('');
+      renewSyncDraft();
+    });
+    list.addEventListener('click', (event) => {
+      const button = event.target.closest('.domain-remove');
+      if (button) removeRenewDomainRow(button);
+    });
   }
-  const addButton = $('#renew-add-btn');
-  if (addButton) addButton.onclick = () => { const field = $('#renew-add'); addRenewDomain(field ? field.value : ''); if (field) field.value = ''; };
+  const addButton = $('#renew-domain-add');
+  if (addButton) addButton.onclick = addRenewDomainRow;
   const apply = $('#renew-apply');
   if (apply) apply.onclick = applyRenew;
 }
@@ -1973,10 +2155,13 @@ $('#sort-order').onchange = (event) => { state.sort = event.target.value; update
 /* Refresh re-derives the state before re-reading it. The rows an operator looks at right after
    touching the Tencent Cloud console are the ones whose answer changed by hand -- a first bind,
    mostly -- and a plain reload would show the state as of the last pass, up to an hour old. The
-   POST is best-effort: a daemon that does not know the route still gets the reload. */
+   daemon forces a fresh cloud-side enumeration for this route (the cached answer is exactly the
+   one that misses a binding made seconds ago), so the request gets a longer timeout: a fresh
+   enumeration may poll for up to half a minute. The POST is best-effort: a daemon that does not
+   know the route still gets the reload. */
 $('#refresh-inventory').onclick = async () => {
   let refreshed = null;
-  try { refreshed = await request('POST', '/api/bindings/refresh', {}); } catch { /* older daemon: reload anyway */ }
+  try { refreshed = await request('POST', '/api/bindings/refresh', {}, false, 40000); } catch { /* older daemon: reload anyway */ }
   try {
     await loadLive();
     const confirmed = (refreshed && refreshed.confirmed) || [];
@@ -1985,6 +2170,8 @@ $('#refresh-inventory').onclick = async () => {
     else toast('Inventory updated');
   } catch (error) { toast(error.message); }
 };
+// The button is the operator's "check now" after binding by hand; say what it does.
+$('#refresh-inventory').title = 'Re-read the inventory and force a fresh cloud binding check (a manual bind is confirmed within ten minutes even without clicking)';
 $('#connect-backend').onclick = () => {
   const url = $('#backend-url');
   // Same-origin is the right default: the daemon is usually behind the same

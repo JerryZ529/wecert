@@ -94,9 +94,11 @@ FIXTURE = {
 }
 
 CREATED = []
+UPDATED = []
+RECONCILED = []
 
 
-def route_handler(page, inventory, status_code=200, session=None, accounts=None):
+def route_handler(page, inventory, status_code=200, session=None, accounts=None, editable=True):
     sess = {"read": True, "admin": True} if session is None else session
     accounts = ACCOUNTS if accounts is None else accounts
 
@@ -111,7 +113,10 @@ def route_handler(page, inventory, status_code=200, session=None, accounts=None)
             route.fulfill(status=status_code, content_type="application/json",
                           body=json.dumps(inventory if status_code == 200 else {"error": "unauthorized"}))
         elif "/api/deployment" in url:
-            route.fulfill(status=200, content_type="application/json", body=json.dumps({"target":"tencent", "editable":True}))
+            # editable=True is the config-driven deployment (the renew panel PUTs the declaration);
+            # editable=False is the enforced one, where the renew agent behind /renew/ owns it.
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"target": "tencent", "editable": editable}))
         elif "/api/accounts" in url:
             route.fulfill(status=200, content_type="application/json", body=json.dumps(accounts))
         elif "/api/bindings" in url:
@@ -120,7 +125,11 @@ def route_handler(page, inventory, status_code=200, session=None, accounts=None)
             CREATED.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"ok": True, "status": "created"}))
+        elif "/admin/certificates" in url and method == "PUT":
+            UPDATED.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
         elif "/hook/reconcile" in url and method == "POST":
+            RECONCILED.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(status=202, content_type="application/json", body=json.dumps({"ok": True}))
         else:
             route.abort()
@@ -140,6 +149,8 @@ class Console2Regression(unittest.TestCase):
 
     def setUp(self):
         CREATED.clear()
+        UPDATED.clear()
+        RECONCILED.clear()
         self.ctx = self.browser.new_context(viewport={"width": 1280, "height": 900})
         self.page = self.ctx.new_page()
         # per-test error list: a browser-reported abort in one test must not
@@ -153,9 +164,9 @@ class Console2Regression(unittest.TestCase):
         self.ctx.close()
 
     # -- helpers -----------------------------------------------------------
-    def load(self, inventory=None, status_code=200, tokens=None, session=None, accounts=None):
+    def load(self, inventory=None, status_code=200, tokens=None, session=None, accounts=None, editable=True):
         inv = FIXTURE if inventory is None else inventory
-        self.page.route("**/*", route_handler(self.page, inv, status_code, session, accounts))
+        self.page.route("**/*", route_handler(self.page, inv, status_code, session, accounts, editable))
         if tokens:
             readonly, admin = tokens
             script = "try{localStorage.setItem('wecert.token',%r);" % readonly
@@ -644,7 +655,8 @@ class Console2Regression(unittest.TestCase):
         self.assertEqual(self.page.locator('[data-row-action="bind"], [data-row-action="unbind"]').count(), 0)
 
     def test_renew_editor_files_changed_domains_with_intent_header(self):
-        self.load()
+        # The enforced backend: the renew agent behind /renew/ owns the declaration.
+        self.load(editable=False)
         requests = []
         def renew(route):
             requests.append(route.request)
@@ -656,10 +668,16 @@ class Console2Regression(unittest.TestCase):
         self.page.route('**/renew/cert/shop-example', renew)
         self.page.click('[data-menu="shop-example"]')
         self.page.click('[data-row-action="renew"]')
-        self.page.wait_for_selector('#renew-add')
+        self.page.wait_for_selector('#renew-domain-list .domain-input')
+        self.assertEqual(self.page.locator('#renew-domain-list .domain-input').count(), 1,
+                         'the declared set opens as one boxed row per name')
+        self.assertEqual(self.page.input_value('#renew-domain-list .domain-input'), 'shop.example.com',
+                         'the row is an input holding the name, not a chip')
         self.assertTrue(self.page.is_disabled('#renew-apply'))
-        self.page.fill('#renew-add', 'api.example.com')
-        self.page.click('#renew-add-btn')
+        self.page.click('#renew-domain-add')
+        self.assertEqual(self.page.locator('#renew-domain-list .domain-input').count(), 2,
+                         '+ Add domain appends one empty boxed row')
+        self.page.locator('#renew-domain-list .domain-input').nth(1).fill('api.example.com')
         self.assertTrue(self.page.is_enabled('#renew-apply'))
         self.page.click('#renew-apply')
         self.page.wait_for_timeout(150)
@@ -667,8 +685,87 @@ class Console2Regression(unittest.TestCase):
         self.assertEqual(requests[-1].headers.get('x-wecert-intent'), 'renew')
         self.assertEqual(json.loads(requests[-1].post_data), {'domains': ['shop.example.com', 'api.example.com'], 'confirm': 'shop-example'})
 
-    def test_renew_unavailable_has_no_enabled_submit(self):
+    def test_renew_config_driven_deployment_puts_the_declaration_and_reconciles(self):
+        # The default fixture is editable, so the panel writes the declaration through the daemon.
         self.load()
+        self.page.click('[data-menu="shop-example"]')
+        self.page.click('[data-row-action="renew"]')
+        self.page.wait_for_selector('#renew-domain-list .domain-input')
+        rows = self.page.locator('#renew-domain-list .domain-input')
+        self.assertEqual([rows.nth(i).input_value() for i in range(rows.count())],
+                         ['shop.example.com', 'cdn.example.com'],
+                         'the declaration opens as its own boxed rows')
+        self.assertEqual(' '.join(self.text('#renew-modal .renew-section h3').split()),
+                         'Declared domains Total 2 first name is the primary',
+                         'the heading carries a total, not the profile limit')
+        self.assertEqual(self.text('#renew-domain-add'), '+ Add domain',
+                         'the add control is the create dialog\'s own')
+        self.assertEqual(self.text('#renew-apply'), 'No change yet')
+        self.page.click('#renew-domain-add')
+        self.assertEqual(rows.count(), 3)
+        # Removing the empty row again puts the editor back where it started: no change.
+        self.page.locator('#renew-domain-list .domain-remove').nth(2).click()
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(self.text('#renew-apply'), 'No change yet')
+        self.page.click('#renew-domain-add')
+        rows.nth(2).fill('api.example.com')
+        self.assertEqual(self.text('#renew-count'), 'Total 3', 'the total follows the boxes')
+        self.assertEqual(self.text('#renew-apply'), 'File change (+1)')
+        self.page.click('#renew-apply')
+        self.page.wait_for_timeout(200)
+        self.assertEqual(UPDATED, [{'domains': ['shop.example.com', 'cdn.example.com', 'api.example.com']}])
+        self.assertEqual(RECONCILED, [{'cert': 'shop-example'}])
+
+    def test_renew_editor_refuses_a_name_that_is_not_a_domain(self):
+        self.load()
+        self.page.click('[data-menu="shop-example"]')
+        self.page.click('[data-row-action="renew"]')
+        self.page.wait_for_selector('#renew-domain-list .domain-input')
+        self.page.click('#renew-domain-add')
+        self.page.locator('#renew-domain-list .domain-input').nth(2).fill('not a domain')
+        self.page.click('#renew-apply')
+        self.page.wait_for_timeout(100)
+        self.assertIn('is not a domain name', self.text('#renew-warn'))
+        self.assertEqual(UPDATED, [], 'nothing is filed while a box breaks the rule')
+
+    def test_renew_add_domain_stops_at_the_profile_cap(self):
+        self.load()
+        self.page.click('[data-menu="shop-example"]')
+        self.page.click('[data-row-action="renew"]')
+        self.page.wait_for_selector('#renew-domain-list .domain-input')
+        # Fill up to the 100-name cap through the DOM: the branch under test is the one on
+        # "+ Add domain", not a hundred clicks that the click count would dominate.
+        self.page.evaluate("""() => {
+            const list = document.querySelector('#renew-domain-list');
+            for (let i = 1; i <= 98; i += 1) {
+              const row = document.createElement('div');
+              row.className = 'domain-row';
+              row.innerHTML = '<input class="domain-input" value="host' + i + '.example.com">';
+              list.append(row);
+            }
+        }""")
+        self.page.click('#renew-domain-add')
+        self.assertIn('cap', self.text('#renew-warn'))
+        self.assertEqual(self.page.locator('#renew-domain-list .domain-row').count(), 100,
+                         'the cap holds: no 101st box appears')
+        # The set lives in a bounded, scrollable box instead of stretching the panel.
+        box = self.page.evaluate("""() => {
+            const list = document.querySelector('#renew-domain-list');
+            const style = getComputedStyle(list);
+            return {overflowY: style.overflowY, maxHeight: style.maxHeight,
+                    scrolls: list.scrollHeight > list.clientHeight};
+        }""")
+        self.assertEqual(box['overflowY'], 'auto', 'the declared set scrolls inside its own box')
+        self.assertNotEqual(box['maxHeight'], 'none', 'the box is height-bounded, not free-growing')
+        self.assertTrue(box['scrolls'], 'a hundred rows scroll rather than stretching the panel')
+        # Removing one name releases the slot again.
+        self.page.locator('#renew-domain-list .domain-remove').first.click()
+        self.page.click('#renew-domain-add')
+        self.assertEqual(self.page.locator('#renew-domain-list .domain-row').count(), 100)
+        self.assertEqual(self.text('#renew-warn'), '')
+
+    def test_renew_unavailable_has_no_enabled_submit(self):
+        self.load(editable=False)
         self.page.route('**/renew/cert/*', lambda route: route.fulfill(status=503, content_type='application/json', body='{"error":"agent unavailable"}'))
         self.page.click('[data-menu="shop-example"]')
         self.page.click('[data-row-action="renew"]')
